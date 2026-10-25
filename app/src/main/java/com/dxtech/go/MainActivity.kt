@@ -4,6 +4,9 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.app.Dialog
 import android.app.DownloadManager
+import android.content.res.Configuration
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
+import androidx.webkit.WebSettingsCompat
 import android.content.Context
 import android.os.Build
 import android.provider.Settings
@@ -50,10 +53,17 @@ class Tab(val web: WebView) {
 }
 
 class MainActivity : Activity() {
-    private val BLUE = Color.parseColor("#1A73E8")
-    private val GRAY = Color.parseColor("#F1F3F4")
-    private val TXT = Color.parseColor("#202124")
-    private val SUB = Color.parseColor("#5F6368")
+    private var dark = false
+    private var BLUE = Color.parseColor("#1A73E8")
+    private var BG = Color.WHITE
+    private var GRAY = Color.parseColor("#F1F3F4")
+    private var TXT = Color.parseColor("#202124")
+    private var SUB = Color.parseColor("#5F6368")
+    private var SEL = Color.parseColor("#E8F0FE")
+    private var STROKE = Color.parseColor("#DADCE0")
+    private var ONBLUE = Color.WHITE
+    private lateinit var srl: SwipeRefreshLayout
+    private var pendingUrl: String? = null
     private val DESKTOP_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
     private val tabs = mutableListOf<Tab>()
@@ -96,21 +106,98 @@ class MainActivity : Activity() {
         setPadding(dp(pad), dp(pad), dp(pad), dp(pad))
         layoutParams = LinearLayout.LayoutParams(dp(size), dp(size))
         ripple(this)
+        setColorFilter(SUB)
+    }
+
+    // ---------- theme ----------
+    private fun applyTheme() {
+        dark = when (prefs.getInt("theme", 0)) {
+            1 -> false
+            2 -> true
+            else -> (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+        }
+        if (dark) {
+            BLUE = Color.parseColor("#8AB4F8"); BG = Color.parseColor("#17181C"); GRAY = Color.parseColor("#2A2C32")
+            TXT = Color.parseColor("#E8EAED"); SUB = Color.parseColor("#9AA0A6"); SEL = Color.parseColor("#2D3B55")
+            STROKE = Color.parseColor("#3C4043"); ONBLUE = Color.parseColor("#0B1B3A")
+        } else {
+            BLUE = Color.parseColor("#1A73E8"); BG = Color.WHITE; GRAY = Color.parseColor("#F1F3F4")
+            TXT = Color.parseColor("#202124"); SUB = Color.parseColor("#5F6368"); SEL = Color.parseColor("#E8F0FE")
+            STROKE = Color.parseColor("#DADCE0"); ONBLUE = Color.WHITE
+        }
+    }
+
+    private fun applyBars() {
+        window.statusBarColor = BG
+        window.navigationBarColor = BG
+        @Suppress("DEPRECATION")
+        window.decorView.systemUiVisibility = if (dark) 0 else (View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun applyWebTheme(w: WebView) {
+        w.setBackgroundColor(BG)
+        try {
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING))
+                WebSettingsCompat.setAlgorithmicDarkeningAllowed(w.settings, dark)
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK))
+                WebSettingsCompat.setForceDark(w.settings, if (dark) WebSettingsCompat.FORCE_DARK_ON else WebSettingsCompat.FORCE_DARK_OFF)
+        } catch (e: Exception) {
+        }
+    }
+
+    private fun restyle() {
+        applyTheme()
+        applyBars()
+        buildUi()
+        tabs.forEach { applyWebTheme(it.web) }
+        showCur()
+    }
+
+    private fun dlgTheme() = if (dark) android.R.style.Theme_Material_Dialog_Alert else android.R.style.Theme_Material_Light_Dialog_Alert
+    private fun fullTheme() = if (dark) android.R.style.Theme_Material_NoActionBar else android.R.style.Theme_Material_Light_NoActionBar
+    private fun hex(c: Int) = String.format("#%06X", 0xFFFFFF and c)
+
+    private fun makeSrl(): SwipeRefreshLayout = SwipeRefreshLayout(this).apply {
+        setColorSchemeColors(BLUE)
+        setProgressBackgroundColorSchemeColor(GRAY)
+        setOnRefreshListener {
+            if (cur.started) {
+                cur.web.reload()
+            } else {
+                isRefreshing = false
+            }
+            Unit
+        }
+        setOnChildScrollUpCallback { _, _ -> cur.web.scrollY > 0 }
     }
 
     // ---------- lifecycle ----------
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
-        window.statusBarColor = Color.WHITE
-        window.navigationBarColor = Color.WHITE
-        @Suppress("DEPRECATION")
-        window.decorView.systemUiVisibility =
-            View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+        applyTheme()
+        applyBars()
         mobileUA = WebSettings.getDefaultUserAgent(this).replace("; wv", "")
         buildUi()
         newTab(intent?.dataString)
         applySavedProxy()
         checkUpdate(false)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val u = pendingUrl
+        if (u != null && Build.VERSION.SDK_INT >= 26 && packageManager.canRequestPackageInstalls()) {
+            pendingUrl = null
+            downloadApk(u)
+        }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val was = dark
+        applyTheme()
+        if (was != dark) restyle()
     }
 
     override fun onNewIntent(intent: Intent?) {
@@ -145,7 +232,7 @@ class MainActivity : Activity() {
     private fun buildUi() {
         root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.WHITE)
+            setBackgroundColor(BG)
         }
         leftIcon = ImageView(this).apply {
             setImageResource(R.drawable.ic_search)
@@ -248,7 +335,7 @@ class MainActivity : Activity() {
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            background = rr(Color.WHITE, 26, Color.parseColor("#DADCE0"), 1)
+            background = rr(GRAY, 26, STROKE, 1)
             elevation = dp(3).toFloat()
             layoutParams = LinearLayout.LayoutParams(-1, dp(52)).apply {
                 marginStart = dp(4); marginEnd = dp(4)
@@ -305,7 +392,7 @@ class MainActivity : Activity() {
         col.addView(logo); col.addView(name); col.addView(sub); col.addView(box); col.addView(row)
         return ScrollView(this).apply {
             isFillViewport = true
-            setBackgroundColor(Color.WHITE)
+            setBackgroundColor(BG)
             addView(col)
         }
     }
@@ -341,29 +428,47 @@ class MainActivity : Activity() {
 
     private fun showCur() {
         content.removeAllViews()
-        content.addView(if (cur.started) cur.web else home, FrameLayout.LayoutParams(-1, -1))
+        if (cur.started) {
+            (cur.web.parent as? ViewGroup)?.removeView(cur.web)
+            srl = makeSrl()
+            srl.addView(cur.web, ViewGroup.LayoutParams(-1, -1))
+            content.addView(srl, FrameLayout.LayoutParams(-1, -1))
+        } else {
+            content.addView(home, FrameLayout.LayoutParams(-1, -1))
+        }
+        content.alpha = 0f
+        content.animate().alpha(1f).setDuration(170).start()
         updateBar()
     }
 
     private fun updateBar() {
-        tabBtn.text = tabs.size.toString()
+        val cnt = tabs.size.toString()
+        if (tabBtn.text.toString() != cnt) {
+            tabBtn.text = cnt
+            tabBtn.scaleX = 1.3f
+            tabBtn.scaleY = 1.3f
+            tabBtn.animate().scaleX(1f).scaleY(1f).setDuration(180).start()
+        }
         val u = if (cur.started) cur.web.url else null
         if (u != null) {
             urlText.text = Uri.parse(u).host?.removePrefix("www.") ?: u
-            leftIcon.setImageResource(if (u.startsWith("https")) R.drawable.ic_lock else R.drawable.ic_search)
+            val lock = u.startsWith("https")
+            leftIcon.setImageResource(if (lock) R.drawable.ic_lock else R.drawable.ic_search)
+            if (lock) leftIcon.setColorFilter(SUB) else leftIcon.clearColorFilter()
         } else {
             urlText.text = ""
             leftIcon.setImageResource(R.drawable.ic_search)
+            leftIcon.clearColorFilter()
         }
         reloadBtn.visibility = if (cur.started) View.VISIBLE else View.GONE
         reloadBtn.setImageResource(if (loading) R.drawable.ic_close else R.drawable.ic_reload)
     }
 
     private fun showTabs() {
-        val dlg = Dialog(this, android.R.style.Theme_Material_Light_NoActionBar)
+        val dlg = Dialog(this, fullTheme())
         val col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.WHITE)
+            setBackgroundColor(BG)
         }
         val head = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -380,7 +485,7 @@ class MainActivity : Activity() {
         val add = TextView(this).apply {
             text = "+ New tab"
             textSize = 15f
-            setTextColor(Color.WHITE)
+            setTextColor(ONBLUE)
             setTypeface(typeface, Typeface.BOLD)
             background = rr(BLUE, 20)
             setPadding(dp(16), dp(10), dp(16), dp(10))
@@ -398,7 +503,7 @@ class MainActivity : Activity() {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
                     setPadding(dp(16), dp(4), dp(4), dp(4))
-                    background = rr(if (t === cur) Color.parseColor("#E8F0FE") else GRAY, 14)
+                    background = rr(if (t === cur) SEL else GRAY, 14)
                     layoutParams = LinearLayout.LayoutParams(-1, dp(56)).apply { topMargin = dp(8) }
                     setOnClickListener { dlg.dismiss(); switchTo(t) }
                 }
@@ -425,18 +530,20 @@ class MainActivity : Activity() {
         dlg.setContentView(col)
         dlg.window?.apply {
             setLayout(-1, -1)
-            statusBarColor = Color.WHITE
-            decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+            statusBarColor = BG
+            navigationBarColor = BG
+            decorView.systemUiVisibility = if (dark) 0 else View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+            setWindowAnimations(android.R.style.Animation_Dialog)
         }
         dlg.show()
     }
 
     // ---------- search overlay ----------
     private fun openSearch() {
-        val dlg = Dialog(this, android.R.style.Theme_Material_Light_NoActionBar)
+        val dlg = Dialog(this, fullTheme())
         val col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.WHITE)
+            setBackgroundColor(BG)
         }
         val back = icon(R.drawable.ic_back, 44, 10)
         back.setOnClickListener { dlg.dismiss() }
@@ -517,8 +624,10 @@ class MainActivity : Activity() {
         dlg.setContentView(col)
         dlg.window?.apply {
             setLayout(-1, -1)
-            statusBarColor = Color.WHITE
-            decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+            statusBarColor = BG
+            navigationBarColor = BG
+            decorView.systemUiVisibility = if (dark) 0 else View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+            setWindowAnimations(android.R.style.Animation_Dialog)
             setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE or WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         }
         dlg.show()
@@ -572,13 +681,13 @@ class MainActivity : Activity() {
 
     private fun errorHtml(msg: String): String =
         "<html><head><meta name='viewport' content='width=device-width,initial-scale=1'></head>" +
-            "<body style='font-family:sans-serif;padding:32px;color:#202124'>" +
+            "<body style='font-family:sans-serif;padding:32px;background:" + hex(BG) + ";color:" + hex(TXT) + "'>" +
             "<h2>This site can\u2019t be reached</h2><p style='color:#5F6368'>" +
             msg.replace("<", "&lt;") +
             "</p><p style='color:#5F6368'>Check your connection, or set a proxy from the menu (\u22EE).</p></body></html>"
 
     private fun configure(w: WebView, t: Tab) {
-        w.setBackgroundColor(Color.WHITE)
+        w.setBackgroundColor(BG)
         w.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
@@ -591,6 +700,8 @@ class MainActivity : Activity() {
             allowFileAccess = false
         }
         applyUA(w)
+        applyWebTheme(w)
+        w.overScrollMode = View.OVER_SCROLL_NEVER
         CookieManager.getInstance().setAcceptThirdPartyCookies(w, false)
 
         w.webViewClient = object : WebViewClient() {
@@ -625,6 +736,7 @@ class MainActivity : Activity() {
             override fun onPageFinished(v: WebView, url: String) {
                 if (t === cur) {
                     loading = false
+                    srl.isRefreshing = false
                     progress.visibility = View.INVISIBLE
                     updateBar()
                 }
@@ -640,7 +752,8 @@ class MainActivity : Activity() {
         w.webChromeClient = object : WebChromeClient() {
             override fun onProgressChanged(v: WebView, p: Int) {
                 if (t === cur) {
-                    progress.progress = p
+                    progress.setProgress(p, true)
+                    if (p >= 100) srl.isRefreshing = false
                     progress.visibility = if (p < 100) View.VISIBLE else View.INVISIBLE
                 }
             }
@@ -695,7 +808,7 @@ class MainActivity : Activity() {
             val r = w.hitTestResult
             val link = r.extra
             if ((r.type == WebView.HitTestResult.SRC_ANCHOR_TYPE || r.type == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE) && link != null) {
-                AlertDialog.Builder(this).setItems(arrayOf("Open in new tab", "Copy link")) { _, i ->
+                AlertDialog.Builder(this, dlgTheme()).setItems(arrayOf("Open in new tab", "Copy link")) { _, i ->
                     if (i == 0) newTab(link)
                     else (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager)
                         .setPrimaryClip(ClipData.newPlainText("url", link))
@@ -715,7 +828,7 @@ class MainActivity : Activity() {
 
     // ---------- menu ----------
     private fun showMenu(anchor: View) {
-        val pm = PopupMenu(this, anchor)
+        val pm = PopupMenu(ContextThemeWrapper(this, if (dark) android.R.style.Theme_Material else android.R.style.Theme_Material_Light), anchor)
         val m = pm.menu
         m.add(0, 1, 0, "New tab")
         m.add(0, 2, 0, "Forward")
@@ -724,8 +837,9 @@ class MainActivity : Activity() {
         m.add(0, 5, 0, "Desktop site").apply { isCheckable = true; isChecked = desktop }
         m.add(0, 6, 0, "Block ads").apply { isCheckable = true; isChecked = blockAds }
         m.add(0, 7, 0, "Proxies")
-        m.add(0, 8, 0, "Check for updates")
+        m.add(0, 8, 0, "Check for updates (v" + BuildConfig.VERSION_CODE + ")")
         m.add(0, 9, 0, "Clear browsing data")
+        m.add(0, 10, 0, "Theme: " + listOf("Auto", "Light", "Dark")[prefs.getInt("theme", 0)])
         pm.setOnMenuItemClickListener { item ->
             when (item.itemId) {
                 1 -> newTab(null)
@@ -749,6 +863,10 @@ class MainActivity : Activity() {
                 6 -> { blockAds = !blockAds; if (cur.started) cur.web.reload() }
                 7 -> showProxies()
                 8 -> checkUpdate(true)
+                10 -> {
+                    prefs.edit().putInt("theme", (prefs.getInt("theme", 0) + 1) % 3).apply()
+                    restyle()
+                }
                 9 -> { wipe(); Toast.makeText(this, "Cleared", Toast.LENGTH_SHORT).show() }
             }
             true
@@ -839,7 +957,7 @@ class MainActivity : Activity() {
     }
 
     private fun askUpdate(ver: Int, url: String) {
-        AlertDialog.Builder(this)
+        AlertDialog.Builder(this, dlgTheme())
             .setTitle("Update available")
             .setMessage("DxTech GO v$ver is ready to install.")
             .setPositiveButton("Update") { _, _ -> downloadApk(url) }
@@ -849,7 +967,8 @@ class MainActivity : Activity() {
 
     private fun downloadApk(url: String) {
         if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
-            toast("Allow \"Install unknown apps\" for DxTech GO, then tap Update again")
+            pendingUrl = url
+            toast("Allow \"Install unknown apps\" for DxTech GO, then go back")
             startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
             return
         }
@@ -857,7 +976,7 @@ class MainActivity : Activity() {
             max = 100
             setPadding(dp(24), dp(16), dp(24), dp(16))
         }
-        val dlg = AlertDialog.Builder(this).setTitle("Downloading update").setView(bar).setCancelable(false).create()
+        val dlg = AlertDialog.Builder(this, dlgTheme()).setTitle("Downloading update").setView(bar).setCancelable(false).create()
         dlg.show()
         Thread {
             try {
@@ -1006,7 +1125,7 @@ class MainActivity : Activity() {
         }
         box.addView(n)
         box.addView(r)
-        AlertDialog.Builder(this).setTitle("Add proxy").setView(box)
+        AlertDialog.Builder(this, dlgTheme()).setTitle("Add proxy").setView(box)
             .setPositiveButton("Save") { _, _ ->
                 val nm = n.text.toString().trim()
                 val line = (if (nm.isNotEmpty()) "$nm|" else "") + r.text.toString().trim()
@@ -1023,11 +1142,11 @@ class MainActivity : Activity() {
     }
 
     private fun showProxies() {
-        val dlg = Dialog(this, android.R.style.Theme_Material_Light_NoActionBar)
+        val dlg = Dialog(this, fullTheme())
         var items = loadAll()
         val col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.WHITE)
+            setBackgroundColor(BG)
         }
         val head = TextView(this).apply {
             text = "Proxies"
@@ -1056,8 +1175,8 @@ class MainActivity : Activity() {
             text = label
             textSize = 14f
             setTypeface(typeface, Typeface.BOLD)
-            setTextColor(if (filled) Color.WHITE else BLUE)
-            background = if (filled) rr(BLUE, 20) else rr(Color.WHITE, 20, BLUE, 1)
+            setTextColor(if (filled) ONBLUE else BLUE)
+            background = if (filled) rr(BLUE, 20) else rr(BG, 20, BLUE, 1)
             setPadding(dp(14), dp(9), dp(14), dp(9))
             layoutParams = LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(8) }
             setOnClickListener { click() }
@@ -1072,7 +1191,7 @@ class MainActivity : Activity() {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
                     setPadding(dp(16), dp(8), dp(6), dp(8))
-                    background = rr(if (p.rule == active) Color.parseColor("#E8F0FE") else GRAY, 14)
+                    background = rr(if (p.rule == active) SEL else GRAY, 14)
                     layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) }
                     setOnClickListener {
                         setProxy(if (p.rule.isEmpty()) null else p.rule)
@@ -1172,8 +1291,10 @@ class MainActivity : Activity() {
         dlg.setContentView(col)
         dlg.window?.apply {
             setLayout(-1, -1)
-            statusBarColor = Color.WHITE
-            decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+            statusBarColor = BG
+            navigationBarColor = BG
+            decorView.systemUiVisibility = if (dark) 0 else View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+            setWindowAnimations(android.R.style.Animation_Dialog)
         }
         dlg.show()
         render()

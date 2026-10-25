@@ -8,7 +8,7 @@ android {
         val vc = (project.findProperty("verCode") as String?)?.toIntOrNull() ?: 1
         val gh = (project.findProperty("ghRepo") as String?) ?: ""
         versionCode = vc
-        versionName = "3.$vc"
+        versionName = "1.$vc"
         buildConfigField("String", "GH_REPO", "\"$gh\"")
     }
     buildFeatures { buildConfig = true }
@@ -28,4 +28,5 @@ android {
 dependencies {
     implementation("androidx.webkit:webkit:1.11.0")
     implementation("androidx.core:core:1.12.0")
+    implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
 }
