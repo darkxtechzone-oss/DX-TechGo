@@ -4,6 +4,17 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.app.Dialog
 import android.app.DownloadManager
+import android.content.Context
+import android.os.Build
+import android.provider.Settings
+import androidx.core.content.FileProvider
+import org.json.JSONObject
+import java.io.ByteArrayInputStream
+import java.io.File
+import java.net.InetSocketAddress
+import java.net.Proxy
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
@@ -57,7 +68,7 @@ class MainActivity : Activity() {
     private lateinit var progress: ProgressBar
     private lateinit var mobileUA: String
     private var desktop = false
-    private var secure = true
+    private var blockAds = true
     private var loading = false
     private var suggestToken = 0
     private var customView: View? = null
@@ -87,11 +98,6 @@ class MainActivity : Activity() {
         ripple(this)
     }
 
-    private fun applySecure() {
-        if (secure) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
-    }
-
     // ---------- lifecycle ----------
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
@@ -100,10 +106,11 @@ class MainActivity : Activity() {
         @Suppress("DEPRECATION")
         window.decorView.systemUiVisibility =
             View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
-        applySecure()
         mobileUA = WebSettings.getDefaultUserAgent(this).replace("; wv", "")
         buildUi()
         newTab(intent?.dataString)
+        applySavedProxy()
+        checkUpdate(false)
     }
 
     override fun onNewIntent(intent: Intent?) {
@@ -419,7 +426,7 @@ class MainActivity : Activity() {
         dlg.window?.apply {
             setLayout(-1, -1)
             statusBarColor = Color.WHITE
-            if (secure) addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
         }
         dlg.show()
     }
@@ -511,8 +518,8 @@ class MainActivity : Activity() {
         dlg.window?.apply {
             setLayout(-1, -1)
             statusBarColor = Color.WHITE
+            decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
             setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE or WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-            if (secure) addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         }
         dlg.show()
         et.post { et.requestFocus(); et.selectAll() }
@@ -597,6 +604,13 @@ class MainActivity : Activity() {
                         true
                     }
                 }
+            }
+
+            override fun shouldInterceptRequest(v: WebView, r: WebResourceRequest): WebResourceResponse? {
+                if (blockAds && isAd(r.url.host)) {
+                    return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
+                }
+                return null
             }
 
             override fun onPageStarted(v: WebView, url: String, f: Bitmap?) {
@@ -708,9 +722,9 @@ class MainActivity : Activity() {
         m.add(0, 3, 0, "Reload")
         m.add(0, 4, 0, "Share")
         m.add(0, 5, 0, "Desktop site").apply { isCheckable = true; isChecked = desktop }
-        m.add(0, 6, 0, "Block screenshots").apply { isCheckable = true; isChecked = secure }
-        m.add(0, 7, 0, "Set proxy")
-        m.add(0, 8, 0, "Clear proxy")
+        m.add(0, 6, 0, "Block ads").apply { isCheckable = true; isChecked = blockAds }
+        m.add(0, 7, 0, "Proxies")
+        m.add(0, 8, 0, "Check for updates")
         m.add(0, 9, 0, "Clear browsing data")
         pm.setOnMenuItemClickListener { item ->
             when (item.itemId) {
@@ -732,24 +746,14 @@ class MainActivity : Activity() {
                     tabs.forEach { applyUA(it.web) }
                     if (cur.started) cur.web.reload()
                 }
-                6 -> { secure = !secure; applySecure() }
-                7 -> askProxy()
-                8 -> setProxy(null)
+                6 -> { blockAds = !blockAds; if (cur.started) cur.web.reload() }
+                7 -> showProxies()
+                8 -> checkUpdate(true)
                 9 -> { wipe(); Toast.makeText(this, "Cleared", Toast.LENGTH_SHORT).show() }
             }
             true
         }
         pm.show()
-    }
-
-    private fun askProxy() {
-        val input = EditText(this).apply {
-            hint = "socks5://host:port  or  host:port"
-            setPadding(dp(24), dp(16), dp(24), dp(16))
-        }
-        AlertDialog.Builder(this).setTitle("Proxy").setView(input)
-            .setPositiveButton("OK") { _, _ -> setProxy(input.text.toString().trim()) }
-            .setNegativeButton("Cancel", null).show()
     }
 
     private fun setProxy(rule: String?) {
@@ -758,6 +762,7 @@ class MainActivity : Activity() {
             return
         }
         val pc = ProxyController.getInstance()
+        prefs.edit().putString("active", rule ?: "").apply()
         if (rule.isNullOrEmpty()) {
             pc.clearProxyOverride({ it.run() }, { Toast.makeText(this, "Proxy off", Toast.LENGTH_SHORT).show() })
         } else {
@@ -766,6 +771,412 @@ class MainActivity : Activity() {
                 if (cur.started) cur.web.reload()
             })
         }
+    }
+
+    // ---------- misc ----------
+    private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
+    private val prefs by lazy { getSharedPreferences("dx", Context.MODE_PRIVATE) }
+
+    // ---------- ad block ----------
+    private val adHosts = setOf(
+        "doubleclick.net", "googlesyndication.com", "googleadservices.com", "adservice.google.com",
+        "google-analytics.com", "2mdn.net", "adnxs.com", "adsrvr.org", "criteo.com", "criteo.net",
+        "taboola.com", "outbrain.com", "popads.net", "popcash.net", "propellerads.com", "exoclick.com",
+        "juicyads.com", "trafficjunky.net", "adsterra.com", "revcontent.com", "mgid.com",
+        "scorecardresearch.com", "quantserve.com", "moatads.com", "adform.net", "rubiconproject.com",
+        "pubmatic.com", "openx.net", "casalemedia.com", "smartadserver.com", "amazon-adsystem.com",
+        "serving-sys.com", "advertising.com", "yieldmo.com", "zedo.com", "media.net", "hilltopads.net",
+        "clickadu.com", "onclickads.net", "adcash.com", "a-ads.com", "ad-maven.com", "admaven.com",
+        "monetag.com", "profitablegatecpm.com", "highperformanceformat.com", "effectivegatecpm.com",
+        "adskeeper.com", "adtng.com", "tsyndicate.com", "trafficstars.com", "bidvertiser.com",
+        "yllix.com", "ero-advertising.com", "plugrush.com", "mookie1.com", "bluekai.com",
+        "krxd.net", "demdex.net", "everesttech.net", "adition.com", "teads.tv", "sharethrough.com",
+        "33across.com", "lijit.com", "sovrn.com", "contextweb.com", "indexww.com", "gumgum.com",
+        "appnexus.com", "adroll.com", "hotjar.com", "mouseflow.com", "ads.yahoo.com", "adsafeprotected.com"
+    )
+
+    private fun isAd(host: String?): Boolean {
+        if (host == null) return false
+        var h: String = host
+        while (true) {
+            if (adHosts.contains(h)) return true
+            val i = h.indexOf('.')
+            if (i < 0) return false
+            h = h.substring(i + 1)
+        }
+    }
+
+    // ---------- auto update (GitHub Releases) ----------
+    private fun checkUpdate(manual: Boolean) {
+        val repo = BuildConfig.GH_REPO
+        if (repo.isEmpty()) {
+            if (manual) toast("Updates work only for GitHub-built APKs")
+            return
+        }
+        Thread {
+            try {
+                val c = URL("https://api.github.com/repos/$repo/releases/latest").openConnection() as HttpURLConnection
+                c.connectTimeout = 6000
+                c.readTimeout = 6000
+                c.setRequestProperty("Accept", "application/vnd.github+json")
+                val j = JSONObject(c.inputStream.bufferedReader().readText())
+                val ver = j.getString("tag_name").removePrefix("v").toIntOrNull() ?: 0
+                val assets = j.getJSONArray("assets")
+                var apk: String? = null
+                for (i in 0 until assets.length()) {
+                    val a = assets.getJSONObject(i)
+                    if (a.getString("name").endsWith(".apk")) apk = a.getString("browser_download_url")
+                }
+                val link = apk
+                runOnUiThread {
+                    if (link != null && ver > BuildConfig.VERSION_CODE) askUpdate(ver, link)
+                    else if (manual) toast("You have the latest version")
+                }
+            } catch (e: Exception) {
+                if (manual) runOnUiThread { toast("Update check failed") }
+            }
+        }.start()
+    }
+
+    private fun askUpdate(ver: Int, url: String) {
+        AlertDialog.Builder(this)
+            .setTitle("Update available")
+            .setMessage("DxTech GO v$ver is ready to install.")
+            .setPositiveButton("Update") { _, _ -> downloadApk(url) }
+            .setNegativeButton("Later", null)
+            .show()
+    }
+
+    private fun downloadApk(url: String) {
+        if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
+            toast("Allow \"Install unknown apps\" for DxTech GO, then tap Update again")
+            startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
+            return
+        }
+        val bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100
+            setPadding(dp(24), dp(16), dp(24), dp(16))
+        }
+        val dlg = AlertDialog.Builder(this).setTitle("Downloading update").setView(bar).setCancelable(false).create()
+        dlg.show()
+        Thread {
+            try {
+                val dir = File(cacheDir, "update")
+                dir.mkdirs()
+                val f = File(dir, "DxTechGO.apk")
+                val c = URL(url).openConnection() as HttpURLConnection
+                c.connectTimeout = 10000
+                c.readTimeout = 20000
+                val total = c.contentLength
+                c.inputStream.use { ins ->
+                    f.outputStream().use { out ->
+                        val buf = ByteArray(32768)
+                        var done = 0L
+                        var n = 0
+                        while (ins.read(buf).also { n = it } > 0) {
+                            out.write(buf, 0, n)
+                            done += n
+                            if (total > 0) {
+                                val p = (done * 100 / total).toInt()
+                                runOnUiThread { bar.progress = p }
+                            }
+                        }
+                    }
+                }
+                runOnUiThread { dlg.dismiss(); installApk(f) }
+            } catch (e: Exception) {
+                runOnUiThread { dlg.dismiss(); toast("Download failed") }
+            }
+        }.start()
+    }
+
+    private fun installApk(f: File) {
+        val uri = FileProvider.getUriForFile(this, "com.dxtech.go.fileprovider", f)
+        val i = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        startActivity(i)
+    }
+
+    // ---------- proxy manager ----------
+    class Px(val name: String, val rule: String, val custom: Boolean) {
+        var ms = -1L
+    }
+
+    private val testPool = Executors.newFixedThreadPool(8)
+
+    private fun parsePx(line: String, custom: Boolean, defScheme: String = "http"): Px? {
+        val l = line.trim()
+        if (l.isEmpty() || l.startsWith("#")) return null
+        val name = if (l.contains("|")) l.substringBefore("|").trim() else ""
+        var rule = (if (l.contains("|")) l.substringAfter("|") else l).trim()
+        if (!rule.contains("://")) rule = "$defScheme://$rule"
+        val hp = rule.substringAfter("://")
+        if (!Regex("^[A-Za-z0-9.\\-]+:[0-9]{2,5}$").matches(hp)) return null
+        return Px(if (name.isEmpty()) hp else name, rule, custom)
+    }
+
+    private fun loadAll(): MutableList<Px> {
+        val out = mutableListOf(Px("Direct (no proxy)", "", false))
+        try {
+            assets.open("proxies.txt").bufferedReader().readLines().forEach { l -> parsePx(l, false)?.let { out.add(it) } }
+        } catch (e: Exception) {
+        }
+        (prefs.getString("remote", "") ?: "").lines().forEach { l -> parsePx(l, false)?.let { out.add(it) } }
+        (prefs.getString("custom", "") ?: "").lines().forEach { l -> parsePx(l, true)?.let { out.add(it) } }
+        return out.distinctBy { it.rule }.toMutableList()
+    }
+
+    private fun removeCustom(rule: String) {
+        val keep = (prefs.getString("custom", "") ?: "").lines().filter { parsePx(it, true)?.rule != rule && it.isNotBlank() }
+        prefs.edit().putString("custom", keep.joinToString("\n")).apply()
+    }
+
+    private fun fetchRemote(done: (Int) -> Unit) {
+        val urls = mutableListOf<Pair<String, String>>()
+        if (BuildConfig.GH_REPO.isNotEmpty())
+            urls.add("https://raw.githubusercontent.com/${BuildConfig.GH_REPO}/main/proxies.txt" to "http")
+        urls.add("https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks5/data.txt" to "socks5")
+        urls.add("https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/https/data.txt" to "http")
+        Thread {
+            val lines = mutableListOf<String>()
+            for ((u, sch) in urls) {
+                try {
+                    val c = URL(u).openConnection() as HttpURLConnection
+                    c.connectTimeout = 8000
+                    c.readTimeout = 8000
+                    var n = 0
+                    for (raw in c.inputStream.bufferedReader().readLines()) {
+                        val p = parsePx(raw, false, sch) ?: continue
+                        lines.add(p.name + "|" + p.rule)
+                        n++
+                        if (n >= 30) break
+                    }
+                } catch (e: Exception) {
+                }
+            }
+            prefs.edit().putString("remote", lines.joinToString("\n")).apply()
+            runOnUiThread { done(lines.size) }
+        }.start()
+    }
+
+    private fun toJavaProxy(rule: String): Proxy {
+        if (rule.isEmpty()) return Proxy.NO_PROXY
+        val scheme = if (rule.contains("://")) rule.substringBefore("://") else "http"
+        val hp = rule.substringAfter("://")
+        val host = hp.substringBeforeLast(":")
+        val port = hp.substringAfterLast(":").toIntOrNull() ?: 8080
+        return Proxy(
+            if (scheme.startsWith("socks")) Proxy.Type.SOCKS else Proxy.Type.HTTP,
+            InetSocketAddress.createUnresolved(host, port)
+        )
+    }
+
+    private fun testPx(p: Px, done: () -> Unit) {
+        testPool.execute {
+            val t0 = System.currentTimeMillis()
+            p.ms = try {
+                val c = URL("https://www.gstatic.com/generate_204").openConnection(toJavaProxy(p.rule)) as HttpURLConnection
+                c.connectTimeout = 4000
+                c.readTimeout = 4000
+                if (c.responseCode in 200..399) System.currentTimeMillis() - t0 else -2L
+            } catch (e: Exception) {
+                -2L
+            }
+            runOnUiThread { done() }
+        }
+    }
+
+    private fun applySavedProxy() {
+        val a = prefs.getString("active", "") ?: ""
+        if (a.isNotEmpty()) setProxy(a)
+    }
+
+    private fun addProxyDialog(saved: () -> Unit) {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(12), dp(24), dp(4))
+        }
+        val n = EditText(this).apply { hint = "Name (optional)"; isSingleLine = true }
+        val r = EditText(this).apply {
+            hint = "socks5://host:port  or  http://host:port"
+            isSingleLine = true
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+        }
+        box.addView(n)
+        box.addView(r)
+        AlertDialog.Builder(this).setTitle("Add proxy").setView(box)
+            .setPositiveButton("Save") { _, _ ->
+                val nm = n.text.toString().trim()
+                val line = (if (nm.isNotEmpty()) "$nm|" else "") + r.text.toString().trim()
+                val p = parsePx(line, true)
+                if (p == null) {
+                    toast("Invalid. Use scheme://host:port")
+                } else {
+                    val old = prefs.getString("custom", "") ?: ""
+                    prefs.edit().putString("custom", (old + "\n" + p.name + "|" + p.rule).trim()).apply()
+                    saved()
+                }
+            }
+            .setNegativeButton("Cancel", null).show()
+    }
+
+    private fun showProxies() {
+        val dlg = Dialog(this, android.R.style.Theme_Material_Light_NoActionBar)
+        var items = loadAll()
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.WHITE)
+        }
+        val head = TextView(this).apply {
+            text = "Proxies"
+            textSize = 22f
+            setTextColor(TXT)
+            setTypeface(typeface, Typeface.BOLD)
+            setPadding(dp(18), dp(14), dp(18), dp(4))
+        }
+        val note = TextView(this).apply {
+            text = "Free public proxies are untrusted. Use them for HTTPS sites only and never log in to sensitive accounts through them."
+            textSize = 12f
+            setTextColor(SUB)
+            setPadding(dp(18), 0, dp(18), dp(8))
+        }
+        val barRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(14), dp(4), dp(6), dp(8))
+        }
+        val bar = HorizontalScrollView(this).apply { addView(barRow) }
+        val list = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), 0, dp(12), dp(12))
+        }
+
+        fun chip(label: String, filled: Boolean, click: () -> Unit): TextView = TextView(this).apply {
+            text = label
+            textSize = 14f
+            setTypeface(typeface, Typeface.BOLD)
+            setTextColor(if (filled) Color.WHITE else BLUE)
+            background = if (filled) rr(BLUE, 20) else rr(Color.WHITE, 20, BLUE, 1)
+            setPadding(dp(14), dp(9), dp(14), dp(9))
+            layoutParams = LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(8) }
+            setOnClickListener { click() }
+        }
+
+        fun render() {
+            list.removeAllViews()
+            val active = prefs.getString("active", "") ?: ""
+            val sorted = items.sortedWith(compareBy<Px>({ it.rule.isNotEmpty() }, { if (it.ms < 0) Long.MAX_VALUE else it.ms }))
+            for (p in sorted) {
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(16), dp(8), dp(6), dp(8))
+                    background = rr(if (p.rule == active) Color.parseColor("#E8F0FE") else GRAY, 14)
+                    layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) }
+                    setOnClickListener {
+                        setProxy(if (p.rule.isEmpty()) null else p.rule)
+                        render()
+                    }
+                }
+                val txt = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+                }
+                txt.addView(TextView(this).apply {
+                    text = p.name
+                    textSize = 15f
+                    setTextColor(TXT)
+                    setTypeface(typeface, Typeface.BOLD)
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                })
+                if (p.rule.isNotEmpty()) {
+                    txt.addView(TextView(this).apply {
+                        text = p.rule.substringBefore("://") + (if (p.custom) " \u00B7 yours" else "")
+                        textSize = 12f
+                        setTextColor(SUB)
+                    })
+                }
+                val msView = TextView(this).apply {
+                    textSize = 13f
+                    setTypeface(typeface, Typeface.BOLD)
+                    setPadding(dp(8), 0, dp(8), 0)
+                    if (p.ms >= 0) {
+                        text = "${p.ms} ms"
+                        setTextColor(if (p.ms < 1000) Color.parseColor("#188038") else Color.parseColor("#E37400"))
+                    } else if (p.ms == -2L) {
+                        text = "fail"
+                        setTextColor(Color.parseColor("#D93025"))
+                    } else {
+                        text = "-"
+                        setTextColor(SUB)
+                    }
+                }
+                row.addView(txt)
+                row.addView(msView)
+                if (p.custom) {
+                    val x = icon(R.drawable.ic_close, 40, 10)
+                    x.setOnClickListener {
+                        removeCustom(p.rule)
+                        items = loadAll()
+                        render()
+                    }
+                    row.addView(x)
+                }
+                list.addView(row)
+            }
+        }
+
+        fun testAll(then: (() -> Unit)?) {
+            val left = AtomicInteger(items.size)
+            items.forEach { it.ms = -1L }
+            render()
+            for (p in items.toList()) {
+                testPx(p) {
+                    render()
+                    if (left.decrementAndGet() == 0) then?.invoke()
+                }
+            }
+        }
+
+        fun auto() {
+            toast("Testing proxies...")
+            testAll {
+                val best = items.filter { it.rule.isNotEmpty() && it.ms >= 0 }.minByOrNull { it.ms }
+                if (best == null) {
+                    toast("No working proxy found")
+                } else {
+                    setProxy(best.rule)
+                    render()
+                }
+            }
+        }
+
+        barRow.addView(chip("Auto fastest", true) { auto() })
+        barRow.addView(chip("Test speed", false) { testAll(null) })
+        barRow.addView(chip("+ Add", false) { addProxyDialog { items = loadAll(); render() } })
+        barRow.addView(chip("Refresh list", false) {
+            toast("Fetching list...")
+            fetchRemote { n ->
+                items = loadAll()
+                render()
+                toast("$n proxies loaded")
+            }
+        })
+
+        col.addView(head)
+        col.addView(note)
+        col.addView(bar)
+        col.addView(ScrollView(this).apply { addView(list) }, LinearLayout.LayoutParams(-1, 0, 1f))
+        dlg.setContentView(col)
+        dlg.window?.apply {
+            setLayout(-1, -1)
+            statusBarColor = Color.WHITE
+            decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+        }
+        dlg.show()
+        render()
     }
 
     private fun wipe() {

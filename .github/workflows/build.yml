@@ -1,5 +1,7 @@
 name: Build APK
 on: [push, workflow_dispatch]
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -9,6 +11,11 @@ jobs:
         with: { distribution: temurin, java-version: 17 }
       - uses: gradle/actions/setup-gradle@v4
         with: { gradle-version: 8.7 }
-      - run: gradle assembleDebug
-      - uses: actions/upload-artifact@v4
-        with: { name: DxTechGO-apk, path: app/build/outputs/apk/debug/*.apk }
+      - run: gradle assembleRelease -PverCode=${{ github.run_number }} -PghRepo=${{ github.repository }}
+      - run: cp app/build/outputs/apk/release/app-release.apk DxTechGO.apk
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: DxTech GO v${{ github.run_number }}
+          files: DxTechGO.apk
+          make_latest: true

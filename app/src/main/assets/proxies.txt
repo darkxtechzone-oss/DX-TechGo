@@ -1,0 +1,4 @@
+# DxTech GO proxy list. One per line:  Name|scheme://host:port   or just   scheme://host:port
+# Supported schemes: http, https, socks4, socks5
+# Add your own trusted proxies below (remove the # at the start of a line):
+# My VPS|socks5://1.2.3.4:1080
